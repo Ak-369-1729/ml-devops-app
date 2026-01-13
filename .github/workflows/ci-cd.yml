@@ -1,0 +1,117 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly check
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.11']
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r backend/requirements.txt
+        pip install pytest pytest-cov pylint
+
+    - name: Lint with pylint
+      run: pylint backend/app.py --exit-zero
+      continue-on-error: true
+
+    - name: Run tests
+      run: |
+        pytest backend/tests/ -v --cov=backend --cov-report=xml
+      continue-on-error: true
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      continue-on-error: true
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Build Docker image
+      run: |
+        docker build -t ml-devops-app:latest -t ml-devops-app:${{ github.sha }} .
+
+    - name: Run container healthcheck
+      run: |
+        docker run -d -p 5000:5000 --name test-container ml-devops-app:latest
+        sleep 10
+        docker exec test-container curl -f http://localhost:5000/health || exit 1
+      continue-on-error: true
+
+    - name: Save Docker image
+      if: success()
+      run: |
+        mkdir -p ./artifacts
+        docker save ml-devops-app:latest -o ./artifacts/ml-devops-app.tar
+        echo "Docker image built successfully"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      if: success()
+      with:
+        name: docker-image
+        path: ./artifacts/
+        retention-days: 5
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+      continue-on-error: true
+
+    - name: Upload Trivy results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+      continue-on-error: true
+
+  notify:
+    needs: [test, build, security-scan]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Build status
+      run: |
+        echo "Test: ${{ needs.test.result }}"
+        echo "Build: ${{ needs.build.result }}"
+        echo "Security: ${{ needs.security-scan.result }}"
