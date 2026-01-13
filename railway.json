@@ -1,0 +1,10 @@
+{
+  "buildCommand": "pip install -r backend/requirements.txt",
+  "startCommand": "cd backend && python app.py",
+  "nixpacks": {
+    "providers": ["python"],
+    "python": {
+      "version": "3.11"
+    }
+  }
+}
